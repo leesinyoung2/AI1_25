@@ -2,7 +2,7 @@
 !pip install ultralytics			
 # 모델 로딩			
 from ultralytics import YOLO			
-# 포즈 추정용 모델 불러오기			
+# 포즈 추정 모델 pose		
 model = YOLO('yolov8n-pose.pt') 	
 
 
@@ -17,8 +17,6 @@ from tqdm import tqdm
 image_folder = '/content/drive/MyDrive/AI1_team25/data/left'		
 output_csv = '/content/drive/MyDrive/AI1_team25/pose_data_left.csv'		
 		
-# 모델은 이미 로딩된 상태
-# model = YOLO('yolov8n-pose.pt') 
 		
 # keypoint index (COCO format)		
 # 어깨: 5,6 / 엉덩이: 11,12 → spine은 중앙값		
