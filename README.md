@@ -1,6 +1,6 @@
 # AI1_25
 
-이미지 파일이 대용량인 관계로 업로드 불가하여 구글드라이브 링크로 대
+이미지 파일이 대용량인 관계로 업로드 불가하여 구글드라이브 링크로 대체 
 
 AIHUB 왼쪽 사진 (annotated_left)
 https://drive.google.com/drive/folders/1MnQhGAKmYITU0ynzxq8luaDmgwkYdSMx?usp=drive_link
