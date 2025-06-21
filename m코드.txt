@@ -1,0 +1,320 @@
+import pandas as pd
+import numpy as np
+
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+
+file_path = "C:/Users/Miyoung/Posture/labeled_pose_data_all.csv"
+import os
+print(os.getcwd())
+
+df = pd.read_csv(file_path)
+df.head()
+
+X = df[['shoulder_x', 'shoulder_y', 'hip_x', 'hip_y']]
+y = df['posture_label']
+# feature와 label 분리
+# x는 YOLOv8로 추출한 keypoint 중 실제 angle에 영향을 미치는 요소
+# y는 예측하고 싶은 대상 (정답 자세 상태)
+
+label_encoder = LabelEncoder()
+label_map = {
+    'normal': 0,
+    'anterior_tilt': 1,
+    'posterior_tilt': 2
+}
+y_encoded = df['posture_label'].map(label_map).values
+# pytorch 분류 모델은 클래스가 숫자 형태여야 하므로, y의 문자열을 숫자로 인코딩
+# normal을 0, anterior_tilt를 1, posterior_tilt를 2로 설정함
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y_encoded,            # 전체 데이터 X, y
+    test_size=0.2,           # 20%는 테스트 데이터로 사용
+    stratify=y_encoded,      # 자세을 비율 동일하게 유지하도록 stratify로 추출
+    random_state=42          # 랜덤 분할을 고정 (재현 가능성 고려)
+)
+
+import torch
+from torch.utils.data import Dataset
+
+class PostureDataset(Dataset):
+    def __init__(self, X, y):# pandas/Numpy 데이터를 pytorch에서 활용 가능한 tensor로 변환
+        self.X = torch.tensor(X.values, dtype=torch.float32)
+        self.y = torch.tensor(y, dtype=torch.long)
+    
+    def __len__(self): # data 길이 
+        return len(self.X)
+
+    def __getitem__(self, idx): # 하나의 샘플 리턴
+        return self.X[idx], self.y[idx]
+
+from torch.utils.data import DataLoader
+
+train_dataset = PostureDataset(X_train, y_train)
+test_dataset = PostureDataset(X_test, y_test)
+# Data 인스턴스 생성
+
+train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
+test_loader = DataLoader(test_dataset, batch_size=32, shuffle=False)
+# DataLoader 생성: dataset에서 데이터를 불러와서 배치 단위로 나누고, 섞고, 모델에 불러오는 역할 
+# batch_size = 32: 모델이 한 번에 학습하는 데이터 묶음 크기를 의미
+# epoch: 전체 학습 데이터를 한 바퀴 돌면서 학습하는 것을 의미
+# shuffle=true: 학습 데이터를 매 epoch마다 무작위로 섞음
+# shuffle=false: 테스트 데이터는 굳이 순서를 섞을 필요는 없음
+
+import torch.nn as nn
+import torch.nn.functional as F
+
+# MLP(Multi-layer perceptron) 모델 이용
+# 3개의 fully-connected layer로 구성
+# 입력 (4차원) ─→ [FC1: 64] ─→ ReLU ─→ [FC2: 32] ─→ ReLU ─→ [FC3: 3] ─→ 결과(logits)
+
+class PostureClassifier(nn.Module):
+    def __init__(self):
+        super(PostureClassifier, self).__init__()
+        self.fc1 = nn.Linear(4, 64)   # 입력: 좌표 4개 → 은닉층 64개
+        # 좌표가 총 4개 (shoulder_x,y, hip_x,y)이므로 입력층은 4
+        # 64개 차원으로 확장하여 복잡한 특징 조합으로 구현
+        self.fc2 = nn.Linear(64, 32)  # 은닉층 64개 → 은닉층 32개
+        # 첫 번째 layer에서 확장한 정보 중 중요한 것만 압축하여 다음 layer로 전달
+        self.fc3 = nn.Linear(32, 3)   # 은닉층 32개 → 출력: 클래스 3개
+        # 최종적으로 normal, anterior_tilt, posterior_tilt 세 가지 클래스 이므로
+    
+        
+    def forward(self, x):
+        x = F.relu(self.fc1(x))       # 첫 번째 은닉층 + ReLU
+        x = F.relu(self.fc2(x))       # 두 번째 은닉층 + ReLU
+        return self.fc3(x)            # 출력층 (softmax 안 써도 됨 → CrossEntropyLoss에서 처리 예정)
+        # ReLU(Rectified Linear Unit, ReLI(X) = max(0, x)
+        # 비선형 함수를 통한 복잡한 관계 학습 및 gradient vanishing 문제 완화
+
+model = PostureClassifier()
+
+# 손실 함수 (다중 클래스 분류)
+criterion = nn.CrossEntropyLoss()
+# softmax 적용, log 씌우기, 정답 index와 비교하여 loss 계산
+
+# 옵티마이저 (Adam이 안정적이고 학습 잘 됨)
+optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+# 모델의 파라미터를 업데이트 해줌
+# Adam: 이전의 변화량 및 현재 gradient를 모두 고려하여 조절
+# lr: 학습률, weight 업데이트 할 때 얼마나 크게 움질일 지 결정
+# 일반적으로 Adam에서 가장 많이 쓰이는 기본 값이 0.001
+
+# GPU 사용 가능하면 GPU로 모델 보내기
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
+
+num_epochs = 20 # epoch 횟수 결정
+
+
+for epoch in range(num_epochs):
+    model.train() # 학습 모드
+    running_loss = 0.0
+    correct = 0
+    total = 0
+    # 초기 값 설정 
+    
+    for X_batch, y_batch in train_loader:
+        X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+
+        # 1. 기울기 초기화
+        optimizer.zero_grad()
+        # 직전 미분 결과 초기화 (gradient 누적을 방지)
+
+        # 2. 순전파
+        outputs = model(X_batch)
+        # 모델에 데이터를 넣고 예측 결과를 받음
+        
+        # 3. 손실 계산
+        loss = criterion(outputs, y_batch)
+        # 예측값 vs 실제값을 비교해서 손실 계산 
+        
+        # 4. 역전파
+        loss.backward()
+        # 손실을 기준으로 각 parameter의 gradient 계산
+        
+        # 5. 파라미터 업데이트
+        optimizer.step()
+
+        # 6. 통계 계산
+        running_loss += loss.item()
+        # batch의 손실 값을 float으로 꺼내고, 이를 running loss에 더해서 전체 epoch 동안의 손실 총합 계산
+        _, predicted = torch.max(outputs, 1)  # 세 가지의 클래스 중 가장 높은 점수 클래스 선택
+        total += y_batch.size(0)
+        # 현재 배치의 총 샘플 수를 total에 누적
+        correct += (predicted == y_batch).sum().item()
+        # 각 샘플이 정답이면 true, 아니면 false. 이 때 맞춘 개수만 더해서 correct에 누적
+        
+    # 에폭 결과 출력
+    acc = 100 * correct / total # 정확도 계산
+    avg_loss = running_loss / len(train_loader) # 평균 loss 계산
+    print(f"Epoch {epoch+1}/{num_epochs} - Loss: {avg_loss:.4f} - Accuracy: {acc:.2f}%")
+
+model.eval()  # 평가 모드 전환
+correct = 0
+total = 0
+
+with torch.no_grad():  # 평가 시엔 학습이 필요 없으므로 gradient 계산 안 함. no_grad 적용
+    for X_batch, y_batch in test_loader:
+        X_batch, y_batch = X_batch.to(device), y_batch.to(device)
+        outputs = model(X_batch)
+        _, predicted = torch.max(outputs, 1)
+        total += y_batch.size(0)
+        correct += (predicted == y_batch).sum().item()
+
+test_acc = 100 * correct / total
+print(f" 테스트 정확도: {test_acc:.2f}%")
+
+# 훈련 정확도와 테스트 정확도를 비교하여 우수한 모델인지 확인 가능
+
+# Inference pipeline 구축
+
+from ultralytics import YOLO
+
+yolo_model = YOLO('yolov8n-pose.pt')  # 사전 학습된 pose 모델
+
+# COCO 기준: 어깨 (5,6), 엉덩이 (11,12)
+def extract_shoulder_hip(keypoints):
+    try:
+        shoulder = (keypoints[5] + keypoints[6]) / 2
+        hip = (keypoints[11] + keypoints[12]) / 2
+        return np.array([shoulder[0], shoulder[1], hip[0], hip[1]])
+    except:
+        return None
+
+import torch
+
+# 학습된 PyTorch 모델 객체가 있어야 함 → 예: model = torch.load('posture_model.pt')
+label_map = {0: 'normal', 1: 'anterior_tilt', 2: 'posterior_tilt'}
+
+def predict_posture(image_path, yolo_model, classifier_model, device='cpu'):
+    results = yolo_model.predict(source=image_path, verbose=False)
+
+    if len(results[0].keypoints.xy) == 0:
+        return "❌ 사람을 인식하지 못했습니다."
+
+    keypoints = results[0].keypoints.xy[0].cpu().numpy()
+    coords = extract_shoulder_hip(keypoints)
+
+    if coords is None:
+        return "❌ keypoint 추출 실패"
+
+    input_tensor = torch.tensor(coords, dtype=torch.float32).unsqueeze(0).to(device)
+
+    classifier_model.eval()
+    with torch.no_grad():
+        output = classifier_model(input_tensor)
+        predicted = torch.argmax(output, dim=1).item()
+
+    return f"✅ 예측된 자세 상태: {label_map[predicted]}"
+
+image_path_example = 'C:/Users/Miyoung/Posture/F1_P01_0316_C_P01_0316_cam126_50f.jpg'  # 경로는 실제 파일 위치에 맞게 수정
+result = predict_posture(image_path_example, yolo_model, model, device='cpu')
+print(result)
+
+import cv2
+import matplotlib.pyplot as plt
+
+def visualize_posture(image_path_example, coords, label=None):
+    img = cv2.imread(image_path_example)
+    if img is None:
+        print("이미지 불러오기 실패")
+        return None
+
+    shoulder = (int(coords[0]), int(coords[1]))
+    hip = (int(coords[2]), int(coords[3]))
+
+    # 시각화: 점 + 선
+    cv2.circle(img, shoulder, 6, (0, 0, 255), -1)  # 🔴 어깨
+    cv2.circle(img, hip, 6, (0, 255, 0), -1)       # 🟢 엉덩이
+    cv2.line(img, shoulder, hip, (255, 255, 0), 2)
+
+    
+
+    # RGB로 변환 후 리턴
+    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    return img_rgb
+
+def predict_and_visualize(image_path_example, yolo_model, classifier_model, device='cpu'):
+    results = yolo_model.predict(source=image_path_example, verbose=False)
+
+    if len(results[0].keypoints.xy) == 0:
+        return None, "❌ 사람 인식 실패"
+
+    keypoints = results[0].keypoints.xy[0].cpu().numpy()
+    coords = extract_shoulder_hip(keypoints)
+
+    if coords is None:
+        return None, "❌ keypoint 추출 실패"
+
+    input_tensor = torch.tensor(coords, dtype=torch.float32).unsqueeze(0).to(device)
+    classifier_model.eval()
+    with torch.no_grad():
+        output = classifier_model(input_tensor)
+        predicted = torch.argmax(output, dim=1).item()
+
+    label_map = {0: 'normal', 1: 'anterior_tilt', 2: 'posterior_tilt'}
+    label = label_map[predicted]
+
+    vis_img = visualize_posture(image_path_example, coords, label)
+    return vis_img, f"예측된 자세: {label}"
+
+import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
+import matplotlib as mpl
+
+# 1. 폰트 경로 설정 (윈도우 기본 한글 폰트 예시)
+font_path = "C:/Windows/Fonts/malgun.ttf"  # 한글 지원되는 폰트
+font_prop = fm.FontProperties(fname=font_path)
+
+# 2. 기본 폰트 설정
+mpl.rc('font', family=font_prop.get_name())
+
+# 3. 마이너 워닝 없애기
+mpl.rcParams['axes.unicode_minus'] = False
+
+image_path_example = 'C:/Users/Miyoung/Posture/F1_P01_0316_C_P01_0316_cam126_50f.jpg'
+vis_img, label = predict_and_visualize(image_path_example, yolo_model, model, device='cpu')
+
+if vis_img is not None:
+    plt.imshow(vis_img)
+    plt.axis('off')
+    plt.title(label)
+    plt.show()
+else:
+    print(label)
+
+import gradio as gr
+import cv2
+import numpy as np
+import tempfile
+
+def gradio_infer(image_np_array):
+    try:
+        # 유효성 검사
+        if image_np_array is None or not isinstance(image_np_array, np.ndarray) or image_np_array.size == 0:
+            return None, "❌ 유효하지 않은 이미지입니다. 파일 업로드 또는 웹캠 촬영을 다시 시도해주세요."
+
+        # 이미지 임시 저장
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as temp:
+            cv2.imwrite(temp.name, cv2.cvtColor(image_np_array, cv2.COLOR_RGB2BGR))
+            image_path = temp.name
+
+        # 추론 실행
+        vis_img, label = predict_and_visualize(image_path, yolo_model, model)
+        return vis_img, label
+
+    except Exception as e:
+        return None, f"❌ 예측 중 오류 발생: {str(e)}"
+
+gr.Interface(
+    fn=gradio_infer,
+    inputs=gr.Image(type="numpy", label="사진 업로드 또는 웹캠 촬영"),  # 📷 둘 다 지원됨
+    outputs=[
+        gr.Image(label="시각화된 keypoint"),
+        gr.Text(label="예측된 자세 상태")
+    ],
+    title="📐 자세 예측기 (YOLO + PyTorch)",
+    description="이미지를 업로드하거나 웹캠으로 촬영해 자세를 분석해보세요."
+).launch()
